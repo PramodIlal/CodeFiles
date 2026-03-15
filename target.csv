@@ -1,4 +1,26 @@
-cust_id,first_nm,last_nm,city_nm
-101,Ram,Kumar,Bangalore
-102,Sita,Devi,Mysore
-103,John,Paul,Chennai
+customer_id,first_name,last_name,city,state,age,salary,department,join_date,status
+1001,Rahul,Sharma,Bangalore,Karnataka,28,55000,IT,2022-01-15,ACTIVE
+1002,Priya,Reddy,Mysuru,Karnataka,31,62000,HR,2021-11-10,ACTIVE
+1003,Amit,Verma,Chennai,Tamil Nadu,26,48000,Finance,2023-03-21,ACTIVE
+1004,Sneha,Iyer,Hyderabad,Telangana,29,70000,IT,2020-07-18,INACTIVE
+1005,Karan,Patel,Mumbai,Maharashtra,35,85000,Sales,2019-09-12,ACTIVE
+1006,Divya,Nair,Kochi,Kerala,27,53000,Marketing,2022-06-05,ACTIVE
+1007,Arjun,Mehta,Pune,Maharashtra,33,76000,Technology,2021-01-28,ACTIVE
+1008,Neha,Gupta,Delhi,Delhi,30,61000,Finance,2020-12-14,ACTIVE
+1009,Vikram,Singh,Jaipur,Rajasthan,32,67000,Sales,2018-08-01,INACTIVE
+1010,Ananya,Rao,Bangalore,Karnataka,25,49000,HR,2023-05-19,ACTIVE
+1011,Rohan,Das,Kolkata,West Bengal,34,71000,IT,2019-04-11,ACTIVE
+1012,Pooja,Kulkarni,Nagpur,Maharashtra,29,59000,Marketing,2021-09-30,ACTIVE
+1013,Suresh,Yadav,Lucknow,Uttar Pradesh,36,88000,Operations,2017-02-23,ACTIVE
+1014,Meera,Joshi,Indore,Madhya Pradesh,28,54000,Finance,2022-10-08,ACTIVE
+1015,Akash,Mishra,Patna,Bihar,31,63000,IT,2020-03-15,ACTIVE
+1016,Kavya,Menon,Trivandrum,Kerala,27,52000,HR,2023-01-09,ACTIVE
+1017,Nikhil,Jain,Surat,Gujarat,30,61000,Sales,2021-06-17,ACTIVE
+1018,Aarti,Kapoor,Chandigarh,Chandigarh,26,50000,Marketing,2022-08-22,ACTIVE
+1019,Manoj,Saxena,Noida,Uttar Pradesh,37,91000,Operations,2016-11-05,ACTIVE
+1020,Deepa,Bhat,Mangalore,Karnataka,29,58000,Finance,2021-04-27,ACTIVE
+1021,Harish,Pillai,Coimbatore,Tamil Nadu,33,74000,IT,2019-07-13,ACTIVE
+1022,Sonal,Agarwal,Ahmedabad,Gujarat,28,56000,HR,2022-02-02,ACTIVE
+1023,Varun,Khanna,Ludhiana,Punjab,32,69000,Sales,2020-10-25,ACTIVE
+1026,Ritika,Malhotra,Delhi,Delhi,29,64000,IT,2022-09-01,ACTIVE
+1027,Kishore,Naidu,Visakhapatnam,Andhra Pradesh,31,60000,Finance,2021-12-12,ACTIVE
