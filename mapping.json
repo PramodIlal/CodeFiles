@@ -21,6 +21,30 @@
     {
       "source_column": "city_nm",
       "target_column": "city"
+    },
+    {
+      "source_column": "state_nm",
+      "target_column": "state"
+    },
+    {
+      "source_column": "age_val",
+      "target_column": "age"
+    },
+    {
+      "source_column": "salary_amt",
+      "target_column": "salary"
+    },
+    {
+      "source_column": "dept_nm",
+      "target_column": "department"
+    },
+    {
+      "source_column": "join_dt",
+      "target_column": "join_date"
+    },
+    {
+      "source_column": "status_cd",
+      "target_column": "status"
     }
   ]
 }
