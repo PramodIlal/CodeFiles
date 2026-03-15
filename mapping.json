@@ -1,0 +1,26 @@
+{
+  "primary_keys": [
+    {
+      "source_column": "cust_id",
+      "target_column": "customer_id"
+    }
+  ],
+  "column_mappings": [
+    {
+      "source_column": "cust_id",
+      "target_column": "customer_id"
+    },
+    {
+      "source_column": "first_nm",
+      "target_column": "first_name"
+    },
+    {
+      "source_column": "last_nm",
+      "target_column": "last_name"
+    },
+    {
+      "source_column": "city_nm",
+      "target_column": "city"
+    }
+  ]
+}
