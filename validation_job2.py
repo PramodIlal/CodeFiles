@@ -25,6 +25,8 @@ def create_spark_session(app_name="ETL Validation Job"):
         SparkSession.builder
         .appName(app_name)
         .master("local[*]")
+        # Disable Arrow to avoid some toPandas() conversion issues on local setups
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
@@ -189,15 +191,6 @@ def get_schema_dict(df):
     Returns schema as dict: {column_name: data_type_string}
     """
     return {field.name: field.dataType.simpleString() for field in df.schema.fields}
-
-
-def spark_df_to_pandas_safe(df):
-    """
-    Converts Spark DF to Pandas DF safely for small/medium result sets.
-    """
-    if df is None:
-        return pd.DataFrame()
-    return df.toPandas()
 
 
 def create_empty_key_df(spark, primary_key_columns):
@@ -490,6 +483,23 @@ def write_csv_from_pandas(df, output_path):
     print(f"[OK] CSV written: {output_path}")
 
 
+def write_spark_df_as_single_csv(df, output_dir_path):
+    """
+    Writes Spark DF as a single CSV file inside a folder (Spark style).
+    Output will be a folder containing:
+      - part-00000...
+      - _SUCCESS
+    """
+    (
+        df.coalesce(1)
+          .write
+          .mode("overwrite")
+          .option("header", "true")
+          .csv(output_dir_path)
+    )
+    print(f"[OK] Spark CSV folder written: {output_dir_path}")
+
+
 def write_detailed_output_files(
     run_output_dir,
     schema_drift_detail_df,
@@ -498,32 +508,31 @@ def write_detailed_output_files(
     extra_records_in_target_spark_df
 ):
     """
-    Writes detailed output files as CSV.
+    Writes:
+      - schema drift as single CSV file via Pandas (small)
+      - detailed outputs as Spark CSV folders (stable for larger data)
     """
-    # 1) Schema drift CSV
+    # 1) Schema drift CSV (small, safe with pandas)
     schema_drift_csv_path = os.path.join(run_output_dir, "schema_datatype_drift.csv")
     write_csv_from_pandas(schema_drift_detail_df, schema_drift_csv_path)
 
-    # 2) Detailed mismatch CSV
-    mismatch_pdf = spark_df_to_pandas_safe(detailed_mismatch_spark_df)
-    mismatch_csv_path = os.path.join(run_output_dir, "detailed_mismatch.csv")
-    write_csv_from_pandas(mismatch_pdf, mismatch_csv_path)
+    # 2) Detailed mismatch CSV folder
+    mismatch_dir = os.path.join(run_output_dir, "detailed_mismatch")
+    write_spark_df_as_single_csv(detailed_mismatch_spark_df, mismatch_dir)
 
-    # 3) Extra records in source CSV (FULL ROWS)
-    extra_source_pdf = spark_df_to_pandas_safe(extra_records_in_source_spark_df)
-    extra_source_csv_path = os.path.join(run_output_dir, "extra_records_in_source.csv")
-    write_csv_from_pandas(extra_source_pdf, extra_source_csv_path)
+    # 3) Extra records in source CSV folder (FULL ROWS)
+    extra_source_dir = os.path.join(run_output_dir, "extra_records_in_source")
+    write_spark_df_as_single_csv(extra_records_in_source_spark_df, extra_source_dir)
 
-    # 4) Extra records in target CSV (FULL ROWS)
-    extra_target_pdf = spark_df_to_pandas_safe(extra_records_in_target_spark_df)
-    extra_target_csv_path = os.path.join(run_output_dir, "extra_records_in_target.csv")
-    write_csv_from_pandas(extra_target_pdf, extra_target_csv_path)
+    # 4) Extra records in target CSV folder (FULL ROWS)
+    extra_target_dir = os.path.join(run_output_dir, "extra_records_in_target")
+    write_spark_df_as_single_csv(extra_records_in_target_spark_df, extra_target_dir)
 
     return {
         "schema_drift_csv": schema_drift_csv_path,
-        "detailed_mismatch_csv": mismatch_csv_path,
-        "extra_records_in_source_csv": extra_source_csv_path,
-        "extra_records_in_target_csv": extra_target_csv_path
+        "detailed_mismatch_csv_folder": mismatch_dir,
+        "extra_records_in_source_csv_folder": extra_source_dir,
+        "extra_records_in_target_csv_folder": extra_target_dir
     }
 
 
@@ -545,18 +554,15 @@ def generate_excel_report(
     source_duplicate_keys,
     target_duplicate_keys,
     overall_status,
-    schema_drift_detail_df,
-    detailed_mismatch_spark_df,
-    extra_records_in_source_spark_df,
-    extra_records_in_target_spark_df
+    schema_drift_detail_df
 ):
     """
-    Generates one Excel file with multiple sheets:
+    Generates one Excel file with SMALL sheets only:
       - summary_report
       - schema_datatype_drift
-      - detailed_mismatch
-      - extra_in_source
-      - extra_in_target
+
+    NOTE:
+    Large detailed outputs are written as Spark CSV folders to avoid EOFException.
     """
     file_name = "reconciliation_report.xlsx"
     output_path = os.path.join(run_output_dir, file_name)
@@ -583,18 +589,10 @@ def generate_excel_report(
     }]
     summary_df = pd.DataFrame(summary_data)
 
-    # Convert Spark DFs to Pandas for Excel sheets
-    detailed_mismatch_pdf = spark_df_to_pandas_safe(detailed_mismatch_spark_df)
-    extra_source_pdf = spark_df_to_pandas_safe(extra_records_in_source_spark_df)
-    extra_target_pdf = spark_df_to_pandas_safe(extra_records_in_target_spark_df)
-
-    # Write workbook
+    # Write workbook (small only)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="summary_report", index=False)
         schema_drift_detail_df.to_excel(writer, sheet_name="schema_datatype_drift", index=False)
-        detailed_mismatch_pdf.to_excel(writer, sheet_name="detailed_mismatch", index=False)
-        extra_source_pdf.to_excel(writer, sheet_name="extra_in_source", index=False)
-        extra_target_pdf.to_excel(writer, sheet_name="extra_in_target", index=False)
 
     print(f"[OK] Excel report generated: {output_path}")
     return output_path
@@ -810,7 +808,7 @@ def main():
     source_dup_df = create_empty_key_df(spark, primary_key_columns)
     target_dup_df = create_empty_key_df(spark, primary_key_columns)
 
-    # IMPORTANT: full-row empty placeholders for extra sheets
+    # IMPORTANT: full-row empty placeholders for extra outputs
     extra_records_in_source_df = source_df.limit(0)
     extra_records_in_target_df = target_df.limit(0)
 
@@ -917,9 +915,9 @@ def main():
     )
 
     # ========================================================
-    # WRITE DETAILED OUTPUT FILES (CSV)
+    # WRITE DETAILED OUTPUT FILES
     # ========================================================
-    print_section("WRITING DETAILED OUTPUT CSV FILES")
+    print_section("WRITING DETAILED OUTPUT FILES")
 
     detailed_output_paths = write_detailed_output_files(
         run_output_dir=run_output_dir,
@@ -934,7 +932,7 @@ def main():
         print(f"  {k}: {v}")
 
     # ========================================================
-    # GENERATE EXCEL REPORT (MULTIPLE SHEETS)
+    # GENERATE EXCEL REPORT (SMALL SHEETS ONLY)
     # ========================================================
     print_section("GENERATING EXCEL REPORT")
 
@@ -956,10 +954,7 @@ def main():
         source_duplicate_keys=source_dup_for_report,
         target_duplicate_keys=target_dup_for_report,
         overall_status=overall_status,
-        schema_drift_detail_df=schema_drift_detail_df,
-        detailed_mismatch_spark_df=detailed_mismatch_df,
-        extra_records_in_source_spark_df=extra_records_in_source_df,
-        extra_records_in_target_spark_df=extra_records_in_target_df
+        schema_drift_detail_df=schema_drift_detail_df
     )
 
     print(f"Excel report created: {excel_file_path}")
