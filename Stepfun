@@ -1,0 +1,56 @@
+{
+  "Comment": "ETL Validation Workflow - Glue Version 2",
+  "StartAt": "RunValidationGlueJob",
+  "States": {
+    "RunValidationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "etl-val-recon-validation-job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.source_path",
+          "--TARGET_PATH.$": "$.target_path",
+          "--MAPPING_PATH.$": "$.mapping_path",
+          "--REPORT_BASE_PATH.$": "$.report_base_path",
+          "--RUN_ID.$": "$.run_id"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ValidationFailed"
+        }
+      ],
+      "Next": "ValidationSucceeded"
+    },
+    "ValidationSucceeded": {
+      "Type": "Pass",
+      "Result": {
+        "status": "SUCCESS",
+        "message": "Validation completed successfully. Reports generated in S3."
+      },
+      "End": true
+    },
+    "ValidationFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Validation failed. Check Glue logs and Step Functions execution details."
+      },
+      "End": true
+    }
+  }
+}
