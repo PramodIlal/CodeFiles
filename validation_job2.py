@@ -1,36 +1,106 @@
 import json
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 
+import boto3
 import pandas as pd
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql import types as T
+
+# AWS Glue imports
+import sys
+from awsglue.utils import getResolvedOptions
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.context import SparkContext
 
 
 # ============================================================
-# CONFIGURATION (LOCAL FILES)
+# GLUE JOB ARGUMENTS
 # ============================================================
-SOURCE_PATH = "data/source.csv"
-TARGET_PATH = "data/target.csv"
-MAPPING_PATH = "data/mapping.json"
-OUTPUT_BASE_PATH = "output"
+args = getResolvedOptions(
+    sys.argv,
+    [
+        "JOB_NAME",
+        "SOURCE_PATH",
+        "TARGET_PATH",
+        "MAPPING_PATH",
+        "REPORT_BASE_PATH",
+        "RUN_ID"
+    ]
+)
+
+SOURCE_PATH = args["SOURCE_PATH"]
+TARGET_PATH = args["TARGET_PATH"]
+MAPPING_PATH = args["MAPPING_PATH"]
+REPORT_BASE_PATH = args["REPORT_BASE_PATH"]
+RUN_ID = args["RUN_ID"]
 
 
 # ============================================================
-# SPARK SESSION
+# S3 HELPERS
+# ============================================================
+def parse_s3_uri(s3_uri):
+    parsed = urlparse(s3_uri)
+    bucket = parsed.netloc
+    key = parsed.path.lstrip("/")
+    return bucket, key
+
+
+def upload_file_to_s3(local_file_path, s3_uri):
+    s3 = boto3.client("s3")
+    bucket, key = parse_s3_uri(s3_uri)
+    s3.upload_file(local_file_path, bucket, key)
+    print(f"[OK] Uploaded to S3: {s3_uri}")
+
+
+def read_text_from_s3(s3_uri):
+    s3 = boto3.client("s3")
+    bucket, key = parse_s3_uri(s3_uri)
+    response = s3.get_object(Bucket=bucket, Key=key)
+    return response["Body"].read().decode("utf-8")
+
+
+def list_s3_objects(bucket, prefix):
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.append(obj["Key"])
+    return keys
+
+
+def delete_s3_prefix(s3_uri):
+    """
+    Deletes all objects under an S3 prefix.
+    Useful before overwrite to avoid stale files.
+    """
+    bucket, prefix = parse_s3_uri(s3_uri)
+    s3 = boto3.client("s3")
+    keys = list_s3_objects(bucket, prefix)
+
+    if not keys:
+        return
+
+    # delete in batches of 1000
+    for i in range(0, len(keys), 1000):
+        batch = keys[i:i+1000]
+        delete_payload = {"Objects": [{"Key": k} for k in batch]}
+        s3.delete_objects(Bucket=bucket, Delete=delete_payload)
+
+    print(f"[OK] Cleared S3 prefix: {s3_uri}")
+
+
+# ============================================================
+# SPARK SESSION (GLUE COMPATIBLE)
 # ============================================================
 def create_spark_session(app_name="ETL Validation Job"):
-    spark = (
-        SparkSession.builder
-        .appName(app_name)
-        .master("local[*]")
-        # Disable Arrow to avoid some toPandas() conversion issues on local setups
-        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
-        .getOrCreate()
-    )
+    sc = SparkContext.getOrCreate()
+    glueContext = GlueContext(sc)
+    spark = glueContext.spark_session
     spark.sparkContext.setLogLevel("ERROR")
-    return spark
+    return spark, glueContext
 
 
 # ============================================================
@@ -39,6 +109,7 @@ def create_spark_session(app_name="ETL Validation Job"):
 def read_csv_file(spark, file_path):
     """
     Reads a CSV file with header and inferSchema enabled.
+    Works for S3 paths in Glue.
     """
     return (
         spark.read
@@ -50,7 +121,7 @@ def read_csv_file(spark, file_path):
 
 def read_mapping_json(mapping_path):
     """
-    Reads mapping JSON from local file system.
+    Reads mapping JSON from S3.
 
     Expected format:
     {
@@ -62,8 +133,8 @@ def read_mapping_json(mapping_path):
       ]
     }
     """
-    with open(mapping_path, "r") as f:
-        mapping = json.load(f)
+    content = read_text_from_s3(mapping_path)
+    mapping = json.loads(content)
 
     primary_keys = mapping.get("primary_keys", [])
     column_mappings = mapping.get("column_mappings", [])
@@ -86,15 +157,25 @@ def print_section(title):
     print("=" * 110)
 
 
-def create_run_output_dir(base_output_dir=OUTPUT_BASE_PATH):
+def create_run_output_dir(base_output_dir=REPORT_BASE_PATH, run_id=RUN_ID):
     """
-    Creates timestamped run folder:
-      output/run_YYYYMMDD_HHMMSS/
+    Creates run folder path in S3:
+      s3://bucket/reports/validation/run_id=<RUN_ID>/
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_output_dir = os.path.join(base_output_dir, f"run_{timestamp}")
-    os.makedirs(run_output_dir, exist_ok=True)
+    if not base_output_dir.endswith("/"):
+        base_output_dir += "/"
+
+    run_output_dir = f"{base_output_dir}run_id={run_id}/"
     return run_output_dir
+
+
+def get_local_tmp_dir(run_id=RUN_ID):
+    """
+    Local temp folder inside Glue container for generating files before upload.
+    """
+    local_tmp_dir = f"/tmp/validation_run_{run_id}"
+    os.makedirs(local_tmp_dir, exist_ok=True)
+    return local_tmp_dir
 
 
 def validate_required_columns(df, required_columns, dataset_name):
@@ -116,21 +197,16 @@ def validate_required_columns(df, required_columns, dataset_name):
 def rename_source_columns_to_common_names(source_df, column_mappings):
     """
     Renames source columns to target/common names based on mapping.
-    Only renames if source column actually exists.
     Example:
       source.first_nm -> first_name
     """
     df = source_df
-    existing_cols = set(df.columns)
-
     for mapping in column_mappings:
         source_col = mapping["source_column"]
         target_col = mapping["target_column"]
 
-        if source_col in existing_cols and source_col != target_col:
+        if source_col != target_col:
             df = df.withColumnRenamed(source_col, target_col)
-            existing_cols.remove(source_col)
-            existing_cols.add(target_col)
 
     return df
 
@@ -193,38 +269,24 @@ def get_schema_dict(df):
     return {field.name: field.dataType.simpleString() for field in df.schema.fields}
 
 
-def create_empty_key_df(spark, primary_key_columns):
+def spark_df_to_pandas_safe(df, max_rows=50000, label="DataFrame"):
     """
-    Creates an empty Spark DF with only primary key columns as string type.
-    Useful when validations are skipped.
+    Safe conversion for SMALL result sets only.
+    Prevents driver memory issues in Glue.
     """
-    schema = T.StructType([
-        T.StructField(col_name, T.StringType(), True) for col_name in primary_key_columns
-    ])
-    return spark.createDataFrame([], schema)
+    if df is None:
+        return pd.DataFrame()
 
+    row_count = df.count()
+    print(f"[INFO] {label} row count before toPandas(): {row_count}")
 
-def create_empty_mismatch_df(spark, primary_key_columns, compare_columns):
-    """
-    Creates an empty Spark DF with columns similar to detailed mismatch output.
-    """
-    fields = []
+    if row_count > max_rows:
+        raise ValueError(
+            f"{label} has {row_count} rows which exceeds safe toPandas() limit of {max_rows}. "
+            f"Use Spark direct write instead."
+        )
 
-    for col_name in primary_key_columns:
-        fields.append(T.StructField(col_name, T.StringType(), True))
-
-    for col_name in compare_columns:
-        fields.append(T.StructField(f"source_{col_name}", T.StringType(), True))
-        fields.append(T.StructField(f"target_{col_name}", T.StringType(), True))
-
-    fields.extend([
-        T.StructField("source_row_hash", T.StringType(), True),
-        T.StructField("target_row_hash", T.StringType(), True),
-        T.StructField("mismatched_columns", T.StringType(), True),
-    ])
-
-    schema = T.StructType(fields)
-    return spark.createDataFrame([], schema)
+    return df.toPandas()
 
 
 # ============================================================
@@ -286,45 +348,29 @@ def validate_duplicate_keys(df, primary_key_columns, dataset_name):
 def validate_missing_and_extra_by_key(source_df, target_df, primary_key_columns):
     """
     Finds:
-      - extra_records_in_source = full source rows present in source, absent in target
-      - extra_records_in_target = full target rows present in target, absent in source
+      - extra_records_in_source = present in source, absent in target
+      - extra_records_in_target = present in target, absent in source
       - matched keys
-
-    Returns full-row DataFrames for extra_in_source and extra_in_target
-    instead of only key columns.
     """
-    # Distinct key sets
     source_keys_df = source_df.select(*primary_key_columns).dropDuplicates()
     target_keys_df = target_df.select(*primary_key_columns).dropDuplicates()
 
-    # source-only keys
-    extra_source_keys_df = source_keys_df.join(
+    # source-only
+    extra_records_in_source_df = source_keys_df.join(
         target_keys_df, on=primary_key_columns, how="left_anti"
     )
 
-    # target-only keys
-    extra_target_keys_df = target_keys_df.join(
+    # target-only
+    extra_records_in_target_df = target_keys_df.join(
         source_keys_df, on=primary_key_columns, how="left_anti"
     )
 
-    # matched keys
     matched_keys_df = source_keys_df.join(
         target_keys_df, on=primary_key_columns, how="inner"
     )
 
-    # FULL source rows for source-only keys
-    extra_records_in_source_df = source_df.join(
-        extra_source_keys_df, on=primary_key_columns, how="inner"
-    )
-
-    # FULL target rows for target-only keys
-    extra_records_in_target_df = target_df.join(
-        extra_target_keys_df, on=primary_key_columns, how="inner"
-    )
-
-    # Counts based on distinct unmatched keys
-    extra_source_count = extra_source_keys_df.count()
-    extra_target_count = extra_target_keys_df.count()
+    extra_source_count = extra_records_in_source_df.count()
+    extra_target_count = extra_records_in_target_df.count()
     matched_count = matched_keys_df.count()
 
     result = {
@@ -473,71 +519,81 @@ def validate_schema_and_datatype_drift(source_df, target_df, expected_common_col
 
 
 # ============================================================
-# OUTPUT WRITER FUNCTIONS
+# OUTPUT WRITER FUNCTIONS (VERSION 2 - PRODUCTION SAFE)
 # ============================================================
 def write_csv_from_pandas(df, output_path):
     """
-    Writes a Pandas DataFrame to CSV.
+    Writes a Pandas DataFrame to CSV (local temp path).
     """
     df.to_csv(output_path, index=False)
-    print(f"[OK] CSV written: {output_path}")
+    print(f"[OK] CSV written locally: {output_path}")
 
 
-def write_spark_df_as_single_csv(df, output_dir_path):
+def write_spark_df_as_single_csv(df, output_s3_uri):
     """
-    Writes Spark DF as a single CSV file inside a folder (Spark style).
-    Output will be a folder containing:
-      - part-00000...
-      - _SUCCESS
+    Writes Spark DF directly to S3 as a folder containing a single part file.
+    This avoids toPandas() for large datasets.
+
+    Output example:
+      s3://bucket/reports/.../detailed_mismatch/
+          part-00000-....csv
+          _SUCCESS
     """
+    delete_s3_prefix(output_s3_uri)
+
     (
         df.coalesce(1)
           .write
           .mode("overwrite")
           .option("header", "true")
-          .csv(output_dir_path)
+          .csv(output_s3_uri)
     )
-    print(f"[OK] Spark CSV folder written: {output_dir_path}")
+
+    print(f"[OK] Spark CSV written to S3 folder: {output_s3_uri}")
 
 
 def write_detailed_output_files(
-    run_output_dir,
+    local_tmp_dir,
+    s3_run_output_dir,
     schema_drift_detail_df,
     detailed_mismatch_spark_df,
     extra_records_in_source_spark_df,
     extra_records_in_target_spark_df
 ):
     """
-    Writes:
-      - schema drift as single CSV file via Pandas (small)
-      - detailed outputs as Spark CSV folders (stable for larger data)
+    VERSION 2:
+    - schema drift stays Pandas (small)
+    - large outputs use Spark direct write to S3
     """
-    # 1) Schema drift CSV (small, safe with pandas)
-    schema_drift_csv_path = os.path.join(run_output_dir, "schema_datatype_drift.csv")
-    write_csv_from_pandas(schema_drift_detail_df, schema_drift_csv_path)
+    # 1) Schema drift CSV (small => safe to keep local+pandas)
+    schema_drift_local = os.path.join(local_tmp_dir, "schema_datatype_drift.csv")
+    schema_drift_s3 = f"{s3_run_output_dir}schema_datatype_drift.csv"
+    write_csv_from_pandas(schema_drift_detail_df, schema_drift_local)
+    upload_file_to_s3(schema_drift_local, schema_drift_s3)
 
-    # 2) Detailed mismatch CSV folder
-    mismatch_dir = os.path.join(run_output_dir, "detailed_mismatch")
-    write_spark_df_as_single_csv(detailed_mismatch_spark_df, mismatch_dir)
+    # 2) Detailed mismatch (Spark direct write)
+    mismatch_s3_folder = f"{s3_run_output_dir}detailed_mismatch/"
+    write_spark_df_as_single_csv(detailed_mismatch_spark_df, mismatch_s3_folder)
 
-    # 3) Extra records in source CSV folder (FULL ROWS)
-    extra_source_dir = os.path.join(run_output_dir, "extra_records_in_source")
-    write_spark_df_as_single_csv(extra_records_in_source_spark_df, extra_source_dir)
+    # 3) Extra records in source (Spark direct write)
+    extra_source_s3_folder = f"{s3_run_output_dir}extra_records_in_source/"
+    write_spark_df_as_single_csv(extra_records_in_source_spark_df, extra_source_s3_folder)
 
-    # 4) Extra records in target CSV folder (FULL ROWS)
-    extra_target_dir = os.path.join(run_output_dir, "extra_records_in_target")
-    write_spark_df_as_single_csv(extra_records_in_target_spark_df, extra_target_dir)
+    # 4) Extra records in target (Spark direct write)
+    extra_target_s3_folder = f"{s3_run_output_dir}extra_records_in_target/"
+    write_spark_df_as_single_csv(extra_records_in_target_spark_df, extra_target_s3_folder)
 
     return {
-        "schema_drift_csv": schema_drift_csv_path,
-        "detailed_mismatch_csv_folder": mismatch_dir,
-        "extra_records_in_source_csv_folder": extra_source_dir,
-        "extra_records_in_target_csv_folder": extra_target_dir
+        "schema_drift_csv": schema_drift_s3,
+        "detailed_mismatch_folder": mismatch_s3_folder,
+        "extra_records_in_source_folder": extra_source_s3_folder,
+        "extra_records_in_target_folder": extra_target_s3_folder
     }
 
 
 def generate_excel_report(
-    run_output_dir,
+    local_tmp_dir,
+    s3_run_output_dir,
     source_count,
     target_count,
     total_mismatch,
@@ -545,8 +601,6 @@ def generate_excel_report(
     extra_records_in_target,
     row_count_status,
     partition_count_status,
-    pre_mapping_status,
-    post_mapping_status,
     schema_drift_status,
     schema_drift_total_columns,
     schema_drift_columns,
@@ -557,15 +611,18 @@ def generate_excel_report(
     schema_drift_detail_df
 ):
     """
-    Generates one Excel file with SMALL sheets only:
-      - summary_report
-      - schema_datatype_drift
+    VERSION 2:
+    Keep Excel lightweight and safe.
 
-    NOTE:
-    Large detailed outputs are written as Spark CSV folders to avoid EOFException.
+    IMPORTANT:
+    Do NOT put large detailed datasets into Excel in Glue.
+    Only keep summary + schema drift detail (small).
+
+    Detailed mismatch / extra records are already written as Spark CSV folders in S3.
     """
     file_name = "reconciliation_report.xlsx"
-    output_path = os.path.join(run_output_dir, file_name)
+    local_output_path = os.path.join(local_tmp_dir, file_name)
+    s3_output_path = f"{s3_run_output_dir}{file_name}"
 
     # Summary sheet
     summary_data = [{
@@ -576,8 +633,6 @@ def generate_excel_report(
         "extra_records_in_target": extra_records_in_target,
         "row_count_status": row_count_status,
         "partition_count_status": partition_count_status,
-        "pre_mapping_column_status": pre_mapping_status,
-        "post_mapping_column_status": post_mapping_status,
         "schema_drift_status": schema_drift_status,
         "schema_total_columns_checked": schema_drift_total_columns,
         "schema_drift_columns": schema_drift_columns,
@@ -585,31 +640,35 @@ def generate_excel_report(
         "source_duplicate_keys": source_duplicate_keys,
         "target_duplicate_keys": target_duplicate_keys,
         "overall_status": overall_status,
-        "run_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "run_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "detailed_mismatch_location": f"{s3_run_output_dir}detailed_mismatch/",
+        "extra_records_in_source_location": f"{s3_run_output_dir}extra_records_in_source/",
+        "extra_records_in_target_location": f"{s3_run_output_dir}extra_records_in_target/"
     }]
     summary_df = pd.DataFrame(summary_data)
 
-    # Write workbook (small only)
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+    # Write workbook locally
+    with pd.ExcelWriter(local_output_path, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="summary_report", index=False)
         schema_drift_detail_df.to_excel(writer, sheet_name="schema_datatype_drift", index=False)
 
-    print(f"[OK] Excel report generated: {output_path}")
-    return output_path
+    print(f"[OK] Excel report generated locally: {local_output_path}")
+
+    # Upload to S3
+    upload_file_to_s3(local_output_path, s3_output_path)
+    return s3_output_path
 
 
 def build_summary_report(validation_results):
     """
     Creates a simple Python list summary for console output.
-    SKIPPED is treated as non-pass for overall status because it usually means
-    schema issue prevented downstream validation.
     """
     summary = []
     overall_status = "PASS"
 
     for result in validation_results:
         summary.append(result)
-        if result.get("status") != "PASS":
+        if result.get("status") == "FAIL":
             overall_status = "FAIL"
 
     return overall_status, summary
@@ -648,176 +707,108 @@ def run_future_validations():
 # MAIN
 # ============================================================
 def main():
-    spark = create_spark_session()
+    spark, glueContext = create_spark_session()
 
-    # Create timestamped run folder
-    run_output_dir = create_run_output_dir()
+    # Initialize Glue Job
+    job = Job(glueContext)
+    job.init(args["JOB_NAME"], args)
 
-    print_section("RUN OUTPUT DIRECTORY")
-    print(f"Run output directory: {run_output_dir}")
+    try:
+        # Create run folder paths
+        run_output_dir = create_run_output_dir()
+        local_tmp_dir = get_local_tmp_dir()
 
-    print_section("READING INPUT FILES")
+        print_section("RUN OUTPUT DIRECTORY")
+        print(f"S3 Run output directory: {run_output_dir}")
+        print(f"Local temp directory: {local_tmp_dir}")
 
-    # Read inputs
-    source_df_raw = read_csv_file(spark, SOURCE_PATH)
-    target_df_raw = read_csv_file(spark, TARGET_PATH)
-    primary_keys, column_mappings = read_mapping_json(MAPPING_PATH)
+        print_section("READING INPUT FILES")
 
-    print("Source columns (raw):", source_df_raw.columns)
-    print("Target columns (raw):", target_df_raw.columns)
+        # Read inputs
+        source_df = read_csv_file(spark, SOURCE_PATH)
+        target_df = read_csv_file(spark, TARGET_PATH)
+        primary_keys, column_mappings = read_mapping_json(MAPPING_PATH)
 
-    # ========================================================
-    # 1) PRE-MAPPING COLUMN VALIDATION (NO HARD FAIL)
-    # ========================================================
-    source_required_columns = [m["source_column"] for m in column_mappings]
-    target_required_columns = [m["target_column"] for m in column_mappings]
+        print("Source columns:", source_df.columns)
+        print("Target columns:", target_df.columns)
 
-    print_section("PRE-MAPPING COLUMN VALIDATION")
-    source_missing_cols = validate_required_columns(source_df_raw, source_required_columns, "SOURCE")
-    target_missing_cols = validate_required_columns(target_df_raw, target_required_columns, "TARGET")
+        # ========================================================
+        # 1) PRE-MAPPING COLUMN VALIDATION
+        # ========================================================
+        source_required_columns = [m["source_column"] for m in column_mappings]
+        target_required_columns = [m["target_column"] for m in column_mappings]
 
-    pre_mapping_columns_ok = not (source_missing_cols or target_missing_cols)
-    pre_mapping_result = {
-        "validation_name": "pre_mapping_column_validation",
-        "source_missing_columns": ",".join(source_missing_cols) if source_missing_cols else "",
-        "target_missing_columns": ",".join(target_missing_cols) if target_missing_cols else "",
-        "status": "PASS" if pre_mapping_columns_ok else "FAIL"
-    }
+        print_section("PRE-MAPPING COLUMN VALIDATION")
+        source_missing_cols = validate_required_columns(source_df, source_required_columns, "SOURCE")
+        target_missing_cols = validate_required_columns(target_df, target_required_columns, "TARGET")
 
-    if not pre_mapping_columns_ok:
-        print("[WARN] Pre-mapping column validation failed. Continuing for schema drift reporting...")
+        if source_missing_cols or target_missing_cols:
+            raise ValueError("Pre-mapping column validation failed. Please fix input files or mapping JSON.")
 
-    # ========================================================
-    # 2) APPLY SOURCE COLUMN MAPPING (SAFE RENAME)
-    # ========================================================
-    print_section("APPLYING SOURCE COLUMN MAPPING")
-    source_df = rename_source_columns_to_common_names(source_df_raw, column_mappings)
-    target_df = target_df_raw
+        # ========================================================
+        # 2) APPLY SOURCE COLUMN MAPPING
+        # ========================================================
+        print_section("APPLYING SOURCE COLUMN MAPPING")
+        source_df = rename_source_columns_to_common_names(source_df, column_mappings)
 
-    print("Source columns after mapping:", source_df.columns)
-    print("Target columns:", target_df.columns)
+        print("Source columns after mapping:", source_df.columns)
+        print("Target columns:", target_df.columns)
 
-    # ========================================================
-    # 3) PREPARE KEYS + COMPARE COLUMNS
-    # ========================================================
-    primary_key_columns = get_common_primary_keys(primary_keys)
-    compare_columns = get_common_compare_columns(column_mappings, primary_key_columns)
-    expected_common_columns = [m["target_column"] for m in column_mappings]
+        # ========================================================
+        # 3) PREPARE KEYS + COMPARE COLUMNS
+        # ========================================================
+        primary_key_columns = get_common_primary_keys(primary_keys)
+        compare_columns = get_common_compare_columns(column_mappings, primary_key_columns)
+        expected_common_columns = [m["target_column"] for m in column_mappings]
 
-    print("Primary key columns:", primary_key_columns)
-    print("Compare columns (non-key):", compare_columns)
+        print("Primary key columns:", primary_key_columns)
+        print("Compare columns (non-key):", compare_columns)
 
-    # ========================================================
-    # 4) POST-MAPPING COMMON COLUMN VALIDATION (NO HARD FAIL)
-    # ========================================================
-    print_section("POST-MAPPING COMMON COLUMN VALIDATION")
-    source_common_missing = validate_required_columns(source_df, expected_common_columns, "SOURCE (POST-MAPPING)")
-    target_common_missing = validate_required_columns(target_df, expected_common_columns, "TARGET")
+        # ========================================================
+        # 4) POST-MAPPING COMMON COLUMN VALIDATION
+        # ========================================================
+        print_section("POST-MAPPING COMMON COLUMN VALIDATION")
+        source_common_missing = validate_required_columns(source_df, expected_common_columns, "SOURCE (POST-MAPPING)")
+        target_common_missing = validate_required_columns(target_df, expected_common_columns, "TARGET")
 
-    post_mapping_columns_ok = not (source_common_missing or target_common_missing)
-    post_mapping_result = {
-        "validation_name": "post_mapping_common_column_validation",
-        "source_missing_common_columns": ",".join(source_common_missing) if source_common_missing else "",
-        "target_missing_common_columns": ",".join(target_common_missing) if target_common_missing else "",
-        "status": "PASS" if post_mapping_columns_ok else "FAIL"
-    }
+        if source_common_missing or target_common_missing:
+            raise ValueError("Post-mapping common column validation failed.")
 
-    if not post_mapping_columns_ok:
-        print("[WARN] Post-mapping common column validation failed. Schema drift will be reported, dependent validations may be skipped.")
+        # Optional: show samples
+        print_section("SOURCE SAMPLE (POST-MAPPING)")
+        source_df.show(5, truncate=False)
 
-    # Optional: show samples
-    print_section("SOURCE SAMPLE (POST-MAPPING)")
-    source_df.show(5, truncate=False)
+        print_section("TARGET SAMPLE")
+        target_df.show(5, truncate=False)
 
-    print_section("TARGET SAMPLE")
-    target_df.show(5, truncate=False)
+        # ========================================================
+        # RUN VALIDATIONS
+        # ========================================================
+        validation_results = []
 
-    # ========================================================
-    # RUN VALIDATIONS
-    # ========================================================
-    validation_results = []
+        # 1) Row count validation
+        print_section("RUNNING ROW COUNT VALIDATION")
+        row_count_result = validate_row_count(source_df, target_df)
+        print(row_count_result)
+        validation_results.append(row_count_result)
 
-    # Add pre/post mapping validations
-    validation_results.append(pre_mapping_result)
-    validation_results.append(post_mapping_result)
+        # 2) Partition count validation
+        print_section("RUNNING PARTITION COUNT VALIDATION")
+        partition_count_result = validate_partition_count(source_df, target_df)
+        print(partition_count_result)
+        validation_results.append(partition_count_result)
 
-    # 1) Row count validation
-    print_section("RUNNING ROW COUNT VALIDATION")
-    row_count_result = validate_row_count(source_df, target_df)
-    print(row_count_result)
-    validation_results.append(row_count_result)
+        # 3) Schema & Datatype Drift validation
+        print_section("RUNNING SCHEMA & DATATYPE DRIFT VALIDATION")
+        schema_drift_result, schema_drift_detail_df = validate_schema_and_datatype_drift(
+            source_df, target_df, expected_common_columns
+        )
+        print(schema_drift_result)
+        validation_results.append(schema_drift_result)
 
-    # 2) Partition count validation
-    print_section("RUNNING PARTITION COUNT VALIDATION")
-    partition_count_result = validate_partition_count(source_df, target_df)
-    print(partition_count_result)
-    validation_results.append(partition_count_result)
+        print("\nSCHEMA & DATATYPE DRIFT DETAILS:")
+        print(schema_drift_detail_df)
 
-    # 3) Schema & Datatype Drift validation
-    print_section("RUNNING SCHEMA & DATATYPE DRIFT VALIDATION")
-    schema_drift_result, schema_drift_detail_df = validate_schema_and_datatype_drift(
-        source_df, target_df, expected_common_columns
-    )
-    print(schema_drift_result)
-    validation_results.append(schema_drift_result)
-
-    print("\nSCHEMA & DATATYPE DRIFT DETAILS:")
-    print(schema_drift_detail_df)
-
-    # ========================================================
-    # DETERMINE WHETHER FULL VALIDATIONS CAN RUN
-    # ========================================================
-    source_cols_set = set(source_df.columns)
-    target_cols_set = set(target_df.columns)
-    primary_keys_present = all(
-        (pk in source_cols_set) and (pk in target_cols_set)
-        for pk in primary_key_columns
-    )
-
-    schema_ok_for_full_validation = (
-        pre_mapping_columns_ok and
-        post_mapping_columns_ok and
-        schema_drift_result["status"] == "PASS" and
-        primary_keys_present
-    )
-
-    # Default placeholders for skipped validations
-    source_dup_result = {
-        "validation_name": "source_duplicate_key_validation",
-        "duplicate_key_count": None,
-        "status": "SKIPPED"
-    }
-    target_dup_result = {
-        "validation_name": "target_duplicate_key_validation",
-        "duplicate_key_count": None,
-        "status": "SKIPPED"
-    }
-    missing_extra_result = {
-        "validation_name": "missing_extra_by_key_validation",
-        "extra_records_in_source_count": None,
-        "extra_records_in_target_count": None,
-        "matched_key_count": None,
-        "status": "SKIPPED"
-    }
-    hash_mismatch_result = {
-        "validation_name": "hash_mismatch_validation",
-        "mismatch_count": None,
-        "status": "SKIPPED"
-    }
-
-    source_dup_df = create_empty_key_df(spark, primary_key_columns)
-    target_dup_df = create_empty_key_df(spark, primary_key_columns)
-
-    # IMPORTANT: full-row empty placeholders for extra outputs
-    extra_records_in_source_df = source_df.limit(0)
-    extra_records_in_target_df = target_df.limit(0)
-
-    detailed_mismatch_df = create_empty_mismatch_df(spark, primary_key_columns, compare_columns)
-
-    # ========================================================
-    # 4) DUPLICATE KEY + 5) MISSING/EXTRA + 6) HASH MISMATCH
-    # ========================================================
-    if schema_ok_for_full_validation:
         # 4) Duplicate key validation
         print_section("RUNNING DUPLICATE KEY VALIDATION")
         source_dup_result, source_dup_df = validate_duplicate_keys(source_df, primary_key_columns, "SOURCE")
@@ -847,11 +838,11 @@ def main():
         validation_results.append(missing_extra_result)
 
         if missing_extra_result["extra_records_in_source_count"] > 0:
-            print("\nEXTRA RECORDS IN SOURCE (FULL ROWS present in source, absent in target):")
+            print("\nEXTRA RECORDS IN SOURCE (present in source, absent in target):")
             extra_records_in_source_df.show(truncate=False)
 
         if missing_extra_result["extra_records_in_target_count"] > 0:
-            print("\nEXTRA RECORDS IN TARGET (FULL ROWS present in target, absent in source):")
+            print("\nEXTRA RECORDS IN TARGET (present in target, absent in source):")
             extra_records_in_target_df.show(truncate=False)
 
         # 6) Hash mismatch validation
@@ -867,105 +858,74 @@ def main():
             print("\nDETAILED MISMATCH RECORDS:")
             detailed_mismatch_df.show(truncate=False)
 
-    else:
-        print_section("SKIPPING DEPENDENT VALIDATIONS")
-        print("Schema/pre-mapping/post-mapping validation failed OR primary key missing.")
-        print("So duplicate key / missing-extra / hash mismatch validations are skipped safely.")
+        # 7) Future validations placeholder
+        print_section("FUTURE VALIDATIONS PLACEHOLDER")
+        run_future_validations()
 
-        validation_results.append(source_dup_result)
-        validation_results.append(target_dup_result)
-        validation_results.append(missing_extra_result)
-        validation_results.append(hash_mismatch_result)
+        # ========================================================
+        # FINAL SUMMARY STATUS
+        # ========================================================
+        overall_status, summary = build_summary_report(validation_results)
 
-    # 7) Future validations placeholder
-    print_section("FUTURE VALIDATIONS PLACEHOLDER")
-    run_future_validations()
+        # ========================================================
+        # WRITE DETAILED OUTPUT FILES (CSV)
+        # ========================================================
+        print_section("WRITING DETAILED OUTPUT FILES (PRODUCTION SAFE)")
 
-    # ========================================================
-    # FINAL SUMMARY STATUS
-    # ========================================================
-    overall_status, summary = build_summary_report(validation_results)
+        detailed_output_paths = write_detailed_output_files(
+            local_tmp_dir=local_tmp_dir,
+            s3_run_output_dir=run_output_dir,
+            schema_drift_detail_df=schema_drift_detail_df,
+            detailed_mismatch_spark_df=detailed_mismatch_df,
+            extra_records_in_source_spark_df=extra_records_in_source_df,
+            extra_records_in_target_spark_df=extra_records_in_target_df
+        )
 
-    # ========================================================
-    # SAFE SUMMARY VALUES FOR REPORTING
-    # ========================================================
-    total_mismatch_for_report = (
-        hash_mismatch_result["mismatch_count"]
-        if hash_mismatch_result["mismatch_count"] is not None else 0
-    )
+        print("Detailed output files:")
+        for k, v in detailed_output_paths.items():
+            print(f"  {k}: {v}")
 
-    extra_source_for_report = (
-        missing_extra_result["extra_records_in_source_count"]
-        if missing_extra_result["extra_records_in_source_count"] is not None else 0
-    )
+        # ========================================================
+        # GENERATE LIGHTWEIGHT EXCEL REPORT
+        # ========================================================
+        print_section("GENERATING LIGHTWEIGHT EXCEL REPORT")
 
-    extra_target_for_report = (
-        missing_extra_result["extra_records_in_target_count"]
-        if missing_extra_result["extra_records_in_target_count"] is not None else 0
-    )
+        excel_file_path = generate_excel_report(
+            local_tmp_dir=local_tmp_dir,
+            s3_run_output_dir=run_output_dir,
+            source_count=row_count_result["source_row_count"],
+            target_count=row_count_result["target_row_count"],
+            total_mismatch=hash_mismatch_result["mismatch_count"],
+            extra_records_in_source=missing_extra_result["extra_records_in_source_count"],
+            extra_records_in_target=missing_extra_result["extra_records_in_target_count"],
+            row_count_status=row_count_result["status"],
+            partition_count_status=partition_count_result["status"],
+            schema_drift_status=schema_drift_result["status"],
+            schema_drift_total_columns=schema_drift_result["total_columns_checked"],
+            schema_drift_columns=schema_drift_result["total_drift_columns"],
+            schema_dtype_mismatch_count=schema_drift_result["datatype_mismatch_count"],
+            source_duplicate_keys=source_dup_result["duplicate_key_count"],
+            target_duplicate_keys=target_dup_result["duplicate_key_count"],
+            overall_status=overall_status,
+            schema_drift_detail_df=schema_drift_detail_df
+        )
 
-    source_dup_for_report = (
-        source_dup_result["duplicate_key_count"]
-        if source_dup_result["duplicate_key_count"] is not None else 0
-    )
+        print(f"Excel report created in S3: {excel_file_path}")
 
-    target_dup_for_report = (
-        target_dup_result["duplicate_key_count"]
-        if target_dup_result["duplicate_key_count"] is not None else 0
-    )
+        # ========================================================
+        # FINAL SUMMARY (CONSOLE)
+        # ========================================================
+        print_summary(overall_status, summary)
 
-    # ========================================================
-    # WRITE DETAILED OUTPUT FILES
-    # ========================================================
-    print_section("WRITING DETAILED OUTPUT FILES")
+        # Commit Glue job
+        job.commit()
 
-    detailed_output_paths = write_detailed_output_files(
-        run_output_dir=run_output_dir,
-        schema_drift_detail_df=schema_drift_detail_df,
-        detailed_mismatch_spark_df=detailed_mismatch_df,
-        extra_records_in_source_spark_df=extra_records_in_source_df,
-        extra_records_in_target_spark_df=extra_records_in_target_df
-    )
+    except Exception as e:
+        print(f"[ERROR] Validation job failed: {str(e)}")
+        raise
 
-    print("Detailed output files:")
-    for k, v in detailed_output_paths.items():
-        print(f"  {k}: {v}")
-
-    # ========================================================
-    # GENERATE EXCEL REPORT (SMALL SHEETS ONLY)
-    # ========================================================
-    print_section("GENERATING EXCEL REPORT")
-
-    excel_file_path = generate_excel_report(
-        run_output_dir=run_output_dir,
-        source_count=row_count_result["source_row_count"],
-        target_count=row_count_result["target_row_count"],
-        total_mismatch=total_mismatch_for_report,
-        extra_records_in_source=extra_source_for_report,
-        extra_records_in_target=extra_target_for_report,
-        row_count_status=row_count_result["status"],
-        partition_count_status=partition_count_result["status"],
-        pre_mapping_status=pre_mapping_result["status"],
-        post_mapping_status=post_mapping_result["status"],
-        schema_drift_status=schema_drift_result["status"],
-        schema_drift_total_columns=schema_drift_result["total_columns_checked"],
-        schema_drift_columns=schema_drift_result["total_drift_columns"],
-        schema_dtype_mismatch_count=schema_drift_result["datatype_mismatch_count"],
-        source_duplicate_keys=source_dup_for_report,
-        target_duplicate_keys=target_dup_for_report,
-        overall_status=overall_status,
-        schema_drift_detail_df=schema_drift_detail_df
-    )
-
-    print(f"Excel report created: {excel_file_path}")
-
-    # ========================================================
-    # FINAL SUMMARY (CONSOLE)
-    # ========================================================
-    print_summary(overall_status, summary)
-
-    # Stop Spark
-    spark.stop()
+    finally:
+        spark.stop()
 
 
 # ============================================================
