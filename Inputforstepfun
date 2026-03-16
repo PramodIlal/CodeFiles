@@ -1,0 +1,10 @@
+"Parameters": {
+  "JobName": "etl-val-recon-validation-job",
+  "Arguments": {
+    "--SOURCE_PATH.$": "$.source_path",
+    "--TARGET_PATH.$": "$.target_path",
+    "--MAPPING_PATH.$": "$.mapping_path",
+    "--REPORT_BASE_PATH.$": "$.report_base_path",
+    "--RUN_ID.$": "$.run_id"
+  }
+}
