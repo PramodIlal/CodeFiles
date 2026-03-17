@@ -1,0 +1,24 @@
+def read_dynamodb_table(glueContext, table_name):
+    dyf = glueContext.create_dynamic_frame.from_options(
+        connection_type="dynamodb",
+        connection_options={
+            "dynamodb.input.tableName": table_name,
+            "dynamodb.throughput.read.percent": "0.5"
+        }
+    )
+    return dyf.toDF()
+
+
+
+
+
+
+
+
+
+
+
+
+
+source_df = read_dynamodb_table(glueContext, SOURCE_TABLE)
+target_df = read_dynamodb_table(glueContext, TARGET_TABLE)
