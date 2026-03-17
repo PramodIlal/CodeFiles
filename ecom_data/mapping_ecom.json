@@ -1,0 +1,61 @@
+{
+  "primary_keys": [
+    {
+      "source_column": "order_id",
+      "target_column": "ord_id",
+      "data_type": "numeric"
+    }
+  ],
+  "column_mappings": [
+    {
+      "source_column": "order_id",
+      "target_column": "ord_id",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "customer_id",
+      "target_column": "cust_id",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "product_name",
+      "target_column": "product_nm",
+      "data_type": "string"
+    },
+    {
+      "source_column": "category",
+      "target_column": "prod_category",
+      "data_type": "string"
+    },
+    {
+      "source_column": "price",
+      "target_column": "price_amt",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "quantity",
+      "target_column": "qty",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "order_status",
+      "target_column": "status_cd",
+      "data_type": "string"
+    },
+    {
+      "source_column": "payment_method",
+      "target_column": "payment_mode",
+      "data_type": "string"
+    },
+    {
+      "source_column": "city",
+      "target_column": "ship_city",
+      "data_type": "string"
+    },
+    {
+      "source_column": "order_date",
+      "target_column": "order_dt",
+      "data_type": "date"
+    }
+  ]
+}
