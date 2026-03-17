@@ -1,0 +1,29 @@
+def read_dynamodb_table(spark, table_name):
+    """
+    Reads a DynamoDB table into a Spark DataFrame using Glue 5.0+ DataFrame connector.
+
+    IMPORTANT:
+    - Glue version should be 5.0
+    - A DYNAMODB connection should be attached to the Glue job
+    """
+    df = (
+        spark.read
+        .format("dynamodb")
+        .option("dynamodb.input.tableName", table_name)
+        .load()
+    )
+
+    return df
+
+
+
+
+
+
+
+
+
+
+
+source_df = read_dynamodb_table(spark, SOURCE_TABLE)
+target_df = read_dynamodb_table(spark, TARGET_TABLE)
