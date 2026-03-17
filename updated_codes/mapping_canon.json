@@ -1,0 +1,26 @@
+{
+  "primary_keys": [
+    {
+      "source_column": "cust_id",
+      "target_column": "customer_id",
+      "data_type": "numeric"
+    }
+  ],
+  "column_mappings": [
+    {
+      "source_column": "cust_id",
+      "target_column": "customer_id",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "price",
+      "target_column": "price_amt",
+      "data_type": "numeric"
+    },
+    {
+      "source_column": "first_nm",
+      "target_column": "first_name",
+      "data_type": "string"
+    }
+  ]
+}
