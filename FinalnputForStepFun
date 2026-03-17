@@ -1,0 +1,7 @@
+{
+  "source_path": "s3://etl-val-recon-dev/source/source.csv",
+  "target_path": "s3://etl-val-recon-dev/target/target.csv",
+  "mapping_path": "s3://etl-val-recon-dev/mappings/mapping.json",
+  "report_base_path": "s3://etl-val-recon-dev/reports/validation/",
+  "run_id": "20260316_150000"
+}
