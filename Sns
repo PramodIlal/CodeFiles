@@ -1,0 +1,54 @@
+import boto3
+from botocore.exceptions import ClientError
+
+# Example values (replace with your actual variables)
+# output_bucket = "etl-validation-reports"
+# run_id = "run_2026-03-18_12-30-00"
+# run_folder = f"reports/{run_id}"
+# topic_arn = "arn:aws:sns:ap-south-1:123456789012:etl-report-topic"
+
+try:
+    # 1. Define S3 report location
+    bucket_name = output_bucket
+    report_key = f"{run_folder}/final_report.xlsx"
+
+    # 2. Create S3 client
+    s3 = boto3.client("s3")
+
+    # 3. Generate pre-signed URL (1 hour safer for Glue demo)
+    presigned_url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket_name, "Key": report_key},
+        ExpiresIn=3600
+    )
+
+    # 4. Create SNS client
+    sns = boto3.client("sns")
+
+    # 5. Build message
+    message = f"""
+ETL Validation Report is ready.
+
+Run ID: {run_id}
+Status: SUCCESS
+
+Download Report:
+{presigned_url}
+
+Note: This secure link expires in 1 hour.
+"""
+
+    # 6. Publish to SNS topic
+    response = sns.publish(
+        TopicArn=topic_arn,
+        Subject="ETL Validation Report Ready",
+        Message=message
+    )
+
+    print(f"SNS notification sent successfully. MessageId: {response['MessageId']}")
+
+except ClientError as e:
+    print(f"Notification failed due to AWS client error: {str(e)}")
+
+except Exception as e:
+    print(f"Unexpected error while sending notification: {str(e)}")
