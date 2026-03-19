@@ -1,0 +1,36 @@
+from pyspark.sql.functions import col
+
+def read_dynamodb_table(glueContext, table_name, schema=None):
+    """
+    Reads DynamoDB table into Spark DataFrame.
+    If schema (StructType) is provided, applies column selection and casting after read.
+    """
+    dyf = glueContext.create_dynamic_frame.from_options(
+        connection_type="dynamodb",
+        connection_options={
+            "dynamodb.input.tableName": table_name,
+            "dynamodb.throughput.read.percent": "0.5"
+        }
+    )
+
+    df = dyf.toDF()
+
+    if schema:
+        df = df.select([
+            col(field.name).cast(field.dataType.simpleString()).alias(field.name)
+            for field in schema.fields
+        ])
+
+    return df
+
+
+
+
+
+
+
+source_schema = build_schema_from_mapping(column_mappings, "source")
+target_schema = build_schema_from_mapping(column_mappings, "target")
+
+source_df = read_dynamodb_table(glueContext, source_table_name, source_schema)
+target_df = read_dynamodb_table(glueContext, target_table_name, target_schema)
