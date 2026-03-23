@@ -1,0 +1,219 @@
+{
+  "Comment": "ETL Mapping, Validation, Reconciliation, and Revalidation Workflow - Glue Version 2",
+  "StartAt": "ReadConfigFromS3",
+  "States": {
+    "ReadConfigFromS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Parameters": {
+        "Bucket": "etl-valid-recon-framework-s3",
+        "Key": "config/config.json"
+      },
+      "ResultSelector": {
+        "config.$": "States.StringToJson($.Body)"
+      },
+      "ResultPath": "$.configData",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ConfigReadFailed"
+        }
+      ],
+      "Next": "RunMappingGeneratorJob"
+    },
+
+    "RunMappingGeneratorJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Mapping_Generator",
+        "Arguments": {
+          "--source.$": "$.configData.config.source",
+          "--target.$": "$.configData.config.target"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MappingGenerationFailed"
+        }
+      ],
+      "Next": "RunValidationGlueJob"
+    },
+
+    "RunValidationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Validation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.configData.config.source",
+          "--TARGET_PATH.$": "$.configData.config.target"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ValidationFailed"
+        }
+      ],
+      "Next": "RunReconciliationGlueJob"
+    },
+
+    "RunReconciliationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Reconciliation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.configData.config.source",
+          "--TARGET_PATH.$": "$.configData.config.target"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "ReconciliationFailed"
+        }
+      ],
+      "Next": "RunRevalidationGlueJob"
+    },
+
+    "RunRevalidationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Validation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.configData.config.source",
+          "--TARGET_PATH": "s3://etl-valid-recon-framework-s3/reports/reconciliation/run_reconciliation/reconciled_target.json",
+          "--OUTPUT_BASE_PATH": "s3://etl-valid-recon-framework-s3/reports/run_revalidation"
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "Glue.InternalServiceException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "RevalidationFailed"
+        }
+      ],
+      "Next": "WorkflowSucceeded"
+    },
+
+    "WorkflowSucceeded": {
+      "Type": "Pass",
+      "Result": {
+        "status": "SUCCESS",
+        "message": "Mapping generation, validation, reconciliation, and revalidation completed successfully."
+      },
+      "End": true
+    },
+
+    "ConfigReadFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Failed to read config.json from S3. Check bucket/key, JSON format, and Step Function IAM permissions."
+      },
+      "End": true
+    },
+
+    "RevalidationFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Revalidation failed. Check Glue logs and Step Functions execution details."
+      },
+      "End": true
+    },
+
+    "ReconciliationFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Reconciliation failed. Revalidation was not executed. Check Glue logs and Step Functions execution details."
+      },
+      "End": true
+    },
+
+    "ValidationFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Validation failed. Reconciliation and revalidation were not executed. Check Glue logs and Step Functions execution details."
+      },
+      "End": true
+    },
+
+    "MappingGenerationFailed": {
+      "Type": "Pass",
+      "Result": {
+        "status": "FAILED",
+        "message": "Mapping generation failed. Validation, reconciliation, and revalidation were not executed. Check Glue logs."
+      },
+      "End": true
+    }
+  }
+}
