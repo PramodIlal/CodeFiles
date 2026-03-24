@@ -1,0 +1,57 @@
+{
+  "sources": [
+    { "name": "orders", "type": "s3", "path": "s3://your-etl-bucket/source_data/orders.csv" },
+    { "name": "customers", "type": "s3", "path": "s3://your-etl-bucket/source_data/customers.csv" },
+    { "name": "payments", "type": "s3", "path": "s3://your-etl-bucket/source_data/payments.csv" }
+  ],
+
+  "join_steps": [
+    {
+      "left": "orders",
+      "right": "customers",
+      "left_key": "customer_id",
+      "right_key": "id",
+      "type": "inner"
+    },
+    {
+      "left": "result",
+      "right": "payments",
+      "left_key": "order_id",
+      "right_key": "order_id",
+      "type": "left"
+    }
+  ],
+
+  "select_columns": [
+    "orders.order_id",
+    "orders.customer_id",
+    "customers.name",
+    "payments.amount"
+  ],
+
+  "column_mapping": {
+    "orders.order_id": "order_id",
+    "orders.customer_id": "customer_id",
+    "customers.name": "customer_name",
+    "payments.amount": "amount"
+  },
+
+  "target": {
+    "type": "s3",
+    "path": "s3://your-etl-bucket/source_data/final_orders.csv"
+  },
+
+  "output": {
+    "source": "s3://your-etl-bucket/raw/processed_source/",
+    "target": "s3://your-etl-bucket/raw/processed_target/"
+  }
+}
+
+
+
+
+
+
+
+
+
