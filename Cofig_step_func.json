@@ -1,0 +1,263 @@
+{
+  "Comment": "ETL Full Workflow with Master Config + Single Pair / Multi Source Routing + Cost + Execution Tracking",
+  "StartAt": "ReadConfigFromS3",
+  "States": {
+    "ReadConfigFromS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+      "Parameters": {
+        "Bucket": "etl-valid-recon-framework-s3",
+        "Key": "configs/config.json"
+      },
+      "ResultSelector": {
+        "config.$": "States.StringToJson($.Body)",
+        "executionArn.$": "$$.Execution.Id"
+      },
+      "ResultPath": "$.configData",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ConfigReadFailed"
+        }
+      ],
+      "Next": "CheckWorkflowType"
+    },
+
+    "CheckWorkflowType": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.configData.config.workflow_type",
+          "StringEquals": "single_pair",
+          "Next": "SetSinglePairPaths"
+        },
+        {
+          "Variable": "$.configData.config.workflow_type",
+          "StringEquals": "multi_source",
+          "Next": "RunPreprocessingJob"
+        }
+      ],
+      "Default": "InvalidWorkflowType"
+    },
+
+    "SetSinglePairPaths": {
+      "Type": "Pass",
+      "Parameters": {
+        "source.$": "$.configData.config.single_pair_workflow.source",
+        "target.$": "$.configData.config.single_pair_workflow.target"
+      },
+      "ResultPath": "$.resolvedPaths",
+      "Next": "RunMappingGeneratorJob"
+    },
+
+    "RunPreprocessingJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Preprocessing_Job.py",
+        "Arguments": {
+          "--CONFIG_S3_PATH": "s3://etl-valid-recon-framework-s3/configs/config.json",
+          "--executionArn.$": "$.configData.executionArn"
+        }
+      },
+      "ResultPath": "$.glueRuns.preprocessing",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "PreprocessingFailed"
+        }
+      ],
+      "Next": "SetMultiSourcePaths"
+    },
+
+    "SetMultiSourcePaths": {
+      "Type": "Pass",
+      "Parameters": {
+        "source.$": "$.configData.config.multi_source_workflow.processed_output.source",
+        "target.$": "$.configData.config.multi_source_workflow.processed_output.target"
+      },
+      "ResultPath": "$.resolvedPaths",
+      "Next": "RunMappingGeneratorJob"
+    },
+
+    "RunMappingGeneratorJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Mapping_Generator",
+        "Arguments": {
+          "--source.$": "$.resolvedPaths.source",
+          "--target.$": "$.resolvedPaths.target",
+          "--primary_key_config": "s3://etl-valid-recon-framework-s3/configs/config.json",
+          "--output_s3_path": "s3://etl-valid-recon-framework-s3/reports/run_mapping",
+          "--openai_api_key": "YOUR_OPENAI_API_KEY",
+          "--model": "gpt-4o",
+          "--strong_cutoff": "0.90",
+          "--apply_mapping": "false",
+          "--executionArn.$": "$.configData.executionArn"
+        }
+      },
+      "ResultPath": "$.glueRuns.mappingGenerator",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "MappingGeneratorFailed"
+        }
+      ],
+      "Next": "RunValidationGlueJob"
+    },
+
+    "RunValidationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Validation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.resolvedPaths.source",
+          "--TARGET_PATH.$": "$.resolvedPaths.target",
+          "--OUTPUT_BASE_PATH": "s3://etl-valid-recon-framework-s3/reports/run_validation",
+          "--executionArn.$": "$.configData.executionArn"
+        }
+      },
+      "ResultPath": "$.glueRuns.validation",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ValidationFailed"
+        }
+      ],
+      "Next": "RunReconciliationGlueJob"
+    },
+
+    "RunReconciliationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Reconciliation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.resolvedPaths.source",
+          "--TARGET_PATH.$": "$.resolvedPaths.target",
+          "--OUTPUT_BASE_PATH": "s3://etl-valid-recon-framework-s3/reports/run_reconciliation",
+          "--executionArn.$": "$.configData.executionArn"
+        }
+      },
+      "ResultPath": "$.glueRuns.reconciliation",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "ReconciliationFailed"
+        }
+      ],
+      "Next": "RunRevalidationGlueJob"
+    },
+
+    "RunRevalidationGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Glue_Validation_Job",
+        "Arguments": {
+          "--SOURCE_PATH.$": "$.resolvedPaths.source",
+          "--TARGET_PATH": "s3://etl-valid-recon-framework-s3/reports/run_reconciliation/reconciled_target.parquet",
+          "--OUTPUT_BASE_PATH": "s3://etl-valid-recon-framework-s3/reports/run_revalidation",
+          "--executionArn.$": "$.configData.executionArn"
+        }
+      },
+      "ResultPath": "$.glueRuns.revalidation",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RevalidationFailed"
+        }
+      ],
+      "Next": "RunFinalReportJob"
+    },
+
+    "RunFinalReportJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "Generate_Final_Report.py",
+        "Arguments": {
+          "--executionArn.$": "$.configData.executionArn",
+          "--mappingRunId.$": "$.glueRuns.mappingGenerator.Id",
+          "--validationRunId.$": "$.glueRuns.validation.Id",
+          "--reconciliationRunId.$": "$.glueRuns.reconciliation.Id",
+          "--revalidationRunId.$": "$.glueRuns.revalidation.Id"
+        }
+      },
+      "ResultPath": "$.glueRuns.finalReport",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "FinalReportFailed"
+        }
+      ],
+      "Next": "WorkflowSucceeded"
+    },
+
+    "WorkflowSucceeded": {
+      "Type": "Pass",
+      "Result": {
+        "status": "SUCCESS",
+        "message": "ETL workflow completed successfully"
+      },
+      "End": true
+    },
+
+    "InvalidWorkflowType": {
+      "Type": "Fail",
+      "Error": "InvalidWorkflowType",
+      "Cause": "workflow_type in master config must be either 'single_pair' or 'multi_source'"
+    },
+
+    "ConfigReadFailed": {
+      "Type": "Fail",
+      "Error": "ConfigReadFailed",
+      "Cause": "Failed to read or parse master config from S3"
+    },
+
+    "PreprocessingFailed": {
+      "Type": "Fail",
+      "Error": "PreprocessingFailed",
+      "Cause": "Preprocessing Glue job failed"
+    },
+
+    "MappingGeneratorFailed": {
+      "Type": "Fail",
+      "Error": "MappingGeneratorFailed",
+      "Cause": "Mapping Generator Glue job failed"
+    },
+
+    "ValidationFailed": {
+      "Type": "Fail",
+      "Error": "ValidationFailed",
+      "Cause": "Validation Glue job failed"
+    },
+
+    "ReconciliationFailed": {
+      "Type": "Fail",
+      "Error": "ReconciliationFailed",
+      "Cause": "Reconciliation Glue job failed"
+    },
+
+    "RevalidationFailed": {
+      "Type": "Fail",
+      "Error": "RevalidationFailed",
+      "Cause": "Revalidation Glue job failed"
+    },
+
+    "FinalReportFailed": {
+      "Type": "Fail",
+      "Error": "FinalReportFailed",
+      "Cause": "Final report Glue job failed"
+    }
+  }
+}
