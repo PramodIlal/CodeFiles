@@ -1,0 +1,97 @@
+{
+  "Comment": "Post migration source target validation and reconciliation",
+  "StartAt": "Validation",
+  "States": {
+
+    "Validation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "customer-validation-job"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Reconciliation"
+        }
+      ],
+      "Next": "ValidationSuccess"
+    },
+
+    "ValidationSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Message": "Post-migration validation PASSED. Source and Target data are already synchronized."
+      },
+      "End": true
+    },
+
+    "Reconciliation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "customer-reconciliation-job"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ReconciliationFailure"
+        }
+      ],
+      "Next": "Revalidation"
+    },
+
+    "Revalidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "customer-validation-job"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "RevalidationFailure"
+        }
+      ],
+      "Next": "RevalidationSuccess"
+    },
+
+    "RevalidationSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Message": "Post-migration reconciliation completed successfully. Target data was corrected using Source as the master and revalidation PASSED."
+      },
+      "End": true
+    },
+
+    "ReconciliationFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Message": "Reconciliation failed. Target data could not be synchronized with Source."
+      },
+      "End": true
+    },
+
+    "RevalidationFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Message": "Revalidation FAILED. Target data still does not match Source."
+      },
+      "End": true
+    }
+  }
+}
