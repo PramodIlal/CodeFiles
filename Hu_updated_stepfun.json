@@ -1,0 +1,127 @@
+{
+  "Comment": "Post migration source target validation and reconciliation",
+  "StartAt": "Validation",
+  "States": {
+
+    "Validation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "customer-validation-job"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Reconciliation"
+        }
+      ],
+      "Next": "ValidationSuccess"
+    },
+
+
+    "ValidationSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Subject": "ETL Validation Successful",
+        "Message": "Post-migration validation PASSED. Source and Target data are already synchronized."
+      },
+      "End": true
+    },
+
+
+    "Reconciliation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+
+      "Parameters": {
+        "JobName": "customer-reconciliation-job",
+
+        "Arguments": {
+          "--SOURCE_PATH": "s3://YOUR-BUCKET/source/customers.csv",
+          "--TARGET_PATH": "s3://YOUR-BUCKET/target/customers.csv",
+          "--REPORT_PATH": "s3://YOUR-BUCKET/reports/customer_reconciliation_report.xlsx",
+          "--SNS_TOPIC_ARN": "YOUR-SNS-TOPIC-ARN"
+        }
+      },
+
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ReconciliationFailure"
+        }
+      ],
+
+      "Next": "Revalidation"
+    },
+
+
+    "Revalidation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+
+      "Parameters": {
+        "JobName": "customer-validation-job"
+      },
+
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "RevalidationFailure"
+        }
+      ],
+
+      "Next": "RevalidationSuccess"
+    },
+
+
+    "RevalidationSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Subject": "ETL Revalidation Successful",
+        "Message": "Reconciliation completed successfully. Target was synchronized with Source and revalidation PASSED."
+      },
+
+      "End": true
+    },
+
+
+    "ReconciliationFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Subject": "ETL Reconciliation Failed",
+        "Message": "Reconciliation failed. Target data could not be synchronized with Source."
+      },
+
+      "End": true
+    },
+
+
+    "RevalidationFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+        "Subject": "ETL Revalidation Failed",
+        "Message": "Revalidation FAILED. Target data still does not match Source."
+      },
+
+      "End": true
+    }
+
+  }
+}
