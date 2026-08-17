@@ -1,0 +1,156 @@
+{
+  "Comment": "Post migration validation, reconciliation and revalidation workflow",
+
+  "StartAt": "Validation",
+
+  "States": {
+
+    "Validation": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+
+      "Parameters": {
+        "JobName": "customer-validation-job",
+
+        "Arguments": {
+          "--SOURCE_PATH": "s3://YOUR-BUCKET/source/customers.csv",
+          "--TARGET_PATH": "s3://YOUR-BUCKET/target/customers.csv",
+          "--REPORT_PATH": "s3://YOUR-BUCKET/reports/validation_report.xlsx",
+          "--RUN_TYPE": "VALIDATION",
+          "--SNS_TOPIC_ARN": "YOUR-SNS-TOPIC-ARN",
+          "--VALIDATION_REPORT_PATH": "s3://YOUR-BUCKET/reports/validation_report.xlsx",
+          "--RECONCILIATION_REPORT_PATH": "s3://YOUR-BUCKET/reports/reconciliation_report.xlsx"
+        }
+      },
+
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "Reconciliation"
+        }
+      ],
+
+      "Next": "ValidationSuccess"
+    },
+
+
+    "ValidationSuccess": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+
+        "Subject": "ETL Validation Successful",
+
+        "Message": "Initial validation PASSED. Source and Target data are already synchronized. Validation report: s3://YOUR-BUCKET/reports/validation_report.xlsx"
+      },
+
+      "End": true
+    },
+
+
+    "Reconciliation": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+
+      "Parameters": {
+        "JobName": "customer-reconciliation-job",
+
+        "Arguments": {
+          "--SOURCE_PATH": "s3://YOUR-BUCKET/source/customers.csv",
+          "--TARGET_PATH": "s3://YOUR-BUCKET/target/customers.csv",
+          "--REPORT_PATH": "s3://YOUR-BUCKET/reports/reconciliation_report.xlsx"
+        }
+      },
+
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ReconciliationFailure"
+        }
+      ],
+
+      "Next": "Revalidation"
+    },
+
+
+    "Revalidation": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+
+      "Parameters": {
+        "JobName": "customer-validation-job",
+
+        "Arguments": {
+          "--SOURCE_PATH": "s3://YOUR-BUCKET/source/customers.csv",
+          "--TARGET_PATH": "s3://YOUR-BUCKET/target/customers.csv",
+          "--REPORT_PATH": "s3://YOUR-BUCKET/reports/revalidation_report.xlsx",
+          "--RUN_TYPE": "REVALIDATION",
+          "--SNS_TOPIC_ARN": "YOUR-SNS-TOPIC-ARN",
+          "--VALIDATION_REPORT_PATH": "s3://YOUR-BUCKET/reports/validation_report.xlsx",
+          "--RECONCILIATION_REPORT_PATH": "s3://YOUR-BUCKET/reports/reconciliation_report.xlsx"
+        }
+      },
+
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "RevalidationFailure"
+        }
+      ],
+
+      "Next": "RevalidationSuccess"
+    },
+
+
+    "RevalidationSuccess": {
+      "Type": "Succeed"
+    },
+
+
+    "ReconciliationFailure": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+
+        "Subject": "ETL Reconciliation Failed",
+
+        "Message": "Reconciliation FAILED. Target could not be synchronized with Source. Check the customer-reconciliation-job CloudWatch logs."
+      },
+
+      "End": true
+    },
+
+
+    "RevalidationFailure": {
+      "Type": "Task",
+
+      "Resource": "arn:aws:states:::sns:publish",
+
+      "Parameters": {
+        "TopicArn": "YOUR-SNS-TOPIC-ARN",
+
+        "Subject": "ETL Revalidation Failed",
+
+        "Message": "Revalidation FAILED. Target still does not match Source. Check revalidation_report.xlsx and customer-validation-job CloudWatch logs."
+      },
+
+      "End": true
+    }
+
+  }
+}
